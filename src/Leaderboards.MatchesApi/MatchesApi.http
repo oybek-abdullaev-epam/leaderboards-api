@@ -4,3 +4,18 @@ GET {{HostAddress}}/
 Accept: application/json
 
 ###
+
+POST {{HostAddress}}/matches
+Content-Type: application/json
+
+{
+  "winnerId": "player-3",
+  "loserId": "player-4"
+}
+
+###
+
+GET {{HostAddress}}/matches
+Accept: application/json
+
+###

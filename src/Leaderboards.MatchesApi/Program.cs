@@ -1,28 +1,31 @@
+using Leaderboards.MatchesApi.Data;
+using Leaderboards.MatchesApi.Matches;
 using Leaderboards.ServiceDefaults;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add service defaults & Aspire client integrations.
 builder.AddServiceDefaults();
-
-// Add services to the container.
 builder.Services.AddProblemDetails();
-
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+
+builder.AddNpgsqlDbContext<MatchesDbContext>("matchesdb");
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 app.UseExceptionHandler();
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<MatchesDbContext>();
+    await db.Database.MigrateAsync();
 }
 
 app.MapGet("/", () => "Matches api is running.");
-
+app.MapMatchesEndpoints();
 app.MapDefaultEndpoints();
 
 app.Run();
