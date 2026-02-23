@@ -13,10 +13,6 @@ dotnet build src/Leaderboards.slnx
 ```bash
 dotnet run --project src/Leaderboards.AppHost
 ```
-Or using the Aspire CLI:
-```bash
-ASPIRE_ALLOW_UNSECURED_TRANSPORT=true /Users/oabdullaev/.aspire/bin/aspire run --project src/Leaderboards.AppHost
-```
 
 **Add an EF Core migration:**
 ```bash
@@ -35,17 +31,17 @@ dotnet dev-certs https --trust
 ### Projects
 
 - **`Leaderboards.MatchesApi`** — Main REST API. Uses EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development on startup via `db.Database.MigrateAsync()`. The connection string `matchesdb` is injected by Aspire at runtime.
-- **`Leaderboards.AppHost`** — Aspire orchestration host. Spins up a PostgreSQL container + pgAdmin, creates the `matchesdb` database, and wires the connection string into `matches-api`. Run this project for local dev.
+- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up a PostgreSQL container + pgAdmin, creates the `matchesdb` database, and wires the connection string into `matches-api`. Run this project for local dev.
 - **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry (tracing, metrics, logging), HTTP resilience, service discovery, and `/health` + `/alive` endpoints (development only).
 
 ### Vertical Slices in MatchesApi
 
-Each feature lives in its own folder under `Matches/` with a static `Map(IEndpointRouteBuilder)` method. All slices are registered in `Matches/MatchesEndpoints.cs` via `app.MapMatchesEndpoints()`.
+Each feature lives in its own folder under `Matches/` with a static `Map(IEndpointRouteBuilder)` method. New slices must be registered in `Matches/MatchesEndpoints.cs` via `app.MapMatchesEndpoints()`.
 
 ```
 Leaderboards.MatchesApi/
 ├── Data/
-│   ├── Match.cs                  — Entity (Guid Id, string WinnerId, string LoserId)
+│   ├── Match.cs                  — Entity (Guid Id, string WinnerId, string LoserId, string VenueName)
 │   ├── MatchesDbContext.cs       — EF Core DbContext
 │   └── Migrations/               — EF Core migrations (auto-applied in dev)
 ├── Matches/
@@ -61,14 +57,15 @@ Leaderboards.MatchesApi/
 
 Every service calls `builder.AddServiceDefaults()` and `app.MapDefaultEndpoints()`. This adds OpenTelemetry (OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), `StandardResilienceHandler` on all `HttpClient` instances, and `/health` (readiness) + `/alive` (liveness) endpoints in development.
 
-### Implemented API
+### Current API
 
-- `POST /matches` — Body: `{ "winnerId": string, "loserId": string }` → 201 with created match
-- `GET /matches` → 200 array of all matches
+- `POST /matches` — Body: `{ "winnerId": string, "loserId": string, "venueName": string }` → 201 with created match
+- `GET /matches?venueName={venueName}` — `venueName` is optional; omit to return all matches → 200 array
+
+OpenAPI docs available in development at `/openapi/v1.json`.
 
 ### Planned API Surface
 
-- `POST /matches/{venueId}` — Submit match result with venue scoping
 - `GET /leaderboards/{venueId}` — Read ranked leaderboard for a venue
 
 ### Scaling Architecture

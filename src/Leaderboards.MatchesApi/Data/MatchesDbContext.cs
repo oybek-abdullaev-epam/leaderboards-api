@@ -13,6 +13,7 @@ public class MatchesDbContext(DbContextOptions<MatchesDbContext> options) : DbCo
             e.HasKey(m => m.Id);
             e.Property(m => m.WinnerId).IsRequired().HasMaxLength(256);
             e.Property(m => m.LoserId).IsRequired().HasMaxLength(256);
+            e.Property(m => m.VenueName).IsRequired().HasMaxLength(256);
         });
     }
 }

@@ -9,9 +9,15 @@ POST {{HostAddress}}/matches
 Content-Type: application/json
 
 {
-  "winnerId": "player-3",
-  "loserId": "player-4"
+  "winnerId": "player-1",
+  "loserId": "player-2",
+  "venueName": "arena-1"
 }
+
+###
+
+GET {{HostAddress}}/matches?venueName=arena-1
+Accept: application/json
 
 ###
 
