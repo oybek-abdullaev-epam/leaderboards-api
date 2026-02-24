@@ -30,13 +30,15 @@ dotnet dev-certs https --trust
 
 ### Projects
 
-- **`Leaderboards.MatchesApi`** — Main REST API. Uses EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development on startup via `db.Database.MigrateAsync()`. The connection string `matchesdb` is injected by Aspire at runtime.
-- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up a PostgreSQL container + pgAdmin, creates the `matchesdb` database, and wires the connection string into `matches-api`. Run this project for local dev.
+- **`Leaderboards.MatchesApi`** — Main REST API. Uses EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development on startup via `db.Database.MigrateAsync()`. Connection strings `matches-db` (Postgres) and `service-bus` (Service Bus) are injected by Aspire at runtime.
+- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up PostgreSQL + pgAdmin + Azure Service Bus emulator, and wires both into `matches-api`. Run this project for local dev.
 - **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry (tracing, metrics, logging), HTTP resilience, service discovery, and `/health` + `/alive` endpoints (development only).
 
 ### Vertical Slices in MatchesApi
 
-Each feature lives in its own folder under `Matches/` with a static `Map(IEndpointRouteBuilder)` method. New slices must be registered in `Matches/MatchesEndpoints.cs` via `app.MapMatchesEndpoints()`.
+Each feature lives in its own folder under `Matches/` with a static `Map(IEndpointRouteBuilder)` method. To add a new slice:
+1. Create `Matches/<Feature>/<FeatureName>Endpoint.cs` with a `public static void Map(IEndpointRouteBuilder app)` method.
+2. Call `FeatureNameEndpoint.Map(app)` inside `MatchesEndpoints.MapMatchesEndpoints()`.
 
 ```
 Leaderboards.MatchesApi/
@@ -47,15 +49,32 @@ Leaderboards.MatchesApi/
 ├── Matches/
 │   ├── MatchesEndpoints.cs       — Registers all slices
 │   ├── Create/
-│   │   └── CreateMatchEndpoint.cs  — POST /matches
+│   │   ├── CreateMatchEndpoint.cs   — POST /matches; publishes MatchCreatedMessage after save
+│   │   └── MatchCreatedMessage.cs   — { DateTime OccurredAtUtc, string VenueName }
 │   └── GetAll/
-│       └── GetMatchesEndpoint.cs   — GET /matches
+│       └── GetMatchesEndpoint.cs    — GET /matches
 └── Program.cs
 ```
+
+### Data Model Notes
+
+`WinnerId` and `LoserId` on the `Match` entity are opaque `string` fields (max 256 chars) — player identity is managed externally. All three string fields have `IsRequired()` and `HasMaxLength(256)` constraints set in `MatchesDbContext.OnModelCreating`.
+
+### Service Bus
+
+`POST /matches` publishes a `MatchCreatedMessage` (JSON) to the `match-created` queue after persisting to the database. `MatchCreatedMessage` intentionally omits winner/loser IDs — it only carries `OccurredAtUtc` and `VenueName` (sufficient for leaderboard ranking updates). The `ServiceBusSender` for this queue is registered as a singleton in `Program.cs` and injected into the endpoint handler.
+
+AppHost wires the emulator via `builder.AddAzureServiceBus("service-bus").RunAsEmulator().AddServiceBusQueue("match-created")`. The API consumes it with `builder.AddAzureServiceBusClient("service-bus")`.
 
 ### Service Defaults Pattern
 
 Every service calls `builder.AddServiceDefaults()` and `app.MapDefaultEndpoints()`. This adds OpenTelemetry (OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), `StandardResilienceHandler` on all `HttpClient` instances, and `/health` (readiness) + `/alive` (liveness) endpoints in development.
+
+`ServiceDefaults/Extensions.cs` uses the **C# 14 `extension` member syntax** (`extension<TBuilder>(TBuilder builder) { ... }`) — this is different from classic `static` extension methods and may look unfamiliar.
+
+### Tests
+
+There are no test projects. Build success and EF migration application (auto-run in dev) are the main verification steps.
 
 ### Current API
 

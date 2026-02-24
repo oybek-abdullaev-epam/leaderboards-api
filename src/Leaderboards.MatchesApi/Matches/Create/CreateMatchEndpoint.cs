@@ -1,3 +1,4 @@
+using Azure.Messaging.ServiceBus;
 using Leaderboards.MatchesApi.Data;
 
 namespace Leaderboards.MatchesApi.Matches.Create;
@@ -9,7 +10,7 @@ public static class CreateMatchEndpoint
 {
     public static void Map(IEndpointRouteBuilder app)
     {
-        app.MapPost("/matches", async (CreateMatchRequest request, MatchesDbContext db) =>
+        app.MapPost("/matches", async (CreateMatchRequest request, MatchesDbContext db, ServiceBusSender sender) =>
         {
             var match = new Match
             {
@@ -21,6 +22,14 @@ public static class CreateMatchEndpoint
 
             db.Matches.Add(match);
             await db.SaveChangesAsync();
+
+            var message = new ServiceBusMessage(
+                BinaryData.FromObjectAsJson(new MatchCreatedMessage(DateTime.UtcNow, match.VenueName)))
+            {
+                ContentType = "application/json"
+            };
+
+            await sender.SendMessageAsync(message);
 
             return Results.Created(
                 $"/matches/{match.Id}",
