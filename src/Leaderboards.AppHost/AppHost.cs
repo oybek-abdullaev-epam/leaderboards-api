@@ -12,7 +12,7 @@ var serviceBus = builder.AddAzureServiceBus("service-bus")
 
 serviceBus.AddServiceBusQueue("match-created");
 
-builder.AddProject<Projects.Leaderboards_MatchesApi>("matches-api")
+var matchesApi = builder.AddProject<Projects.Leaderboards_MatchesApi>("matches-api")
     .WithReference(matchesDb)
     .WithReference(serviceBus)
     .WaitFor(matchesDb)
@@ -21,7 +21,9 @@ builder.AddProject<Projects.Leaderboards_MatchesApi>("matches-api")
 
 builder.AddAzureFunctionsProject<Projects.Leaderboards_Service>("leaderboards-service")
     .WithReference(serviceBus)
+    .WithReference(matchesApi)
     .WithHostStorage(storage)
-    .WaitFor(serviceBus);
+    .WaitFor(serviceBus)
+    .WaitFor(matchesApi);
 
 builder.Build().Run();

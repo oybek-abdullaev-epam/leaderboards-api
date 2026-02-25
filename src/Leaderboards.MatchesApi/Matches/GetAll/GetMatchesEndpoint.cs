@@ -1,9 +1,8 @@
+using Leaderboards.Contracts;
 using Leaderboards.MatchesApi.Data;
 using Microsoft.EntityFrameworkCore;
 
 namespace Leaderboards.MatchesApi.Matches.GetAll;
-
-public record MatchResponse(Guid Id, string WinnerId, string LoserId, string VenueName);
 
 public static class GetMatchesEndpoint
 {
