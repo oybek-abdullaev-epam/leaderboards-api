@@ -18,6 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Leaderboards.Service\Leaderboards.Service.csproj" />
     <ProjectReference Include="..\Leaderboards.MatchesApi\Leaderboards.MatchesApi.csproj" />
+    <ProjectReference Include="..\Leaderboards.LeaderboardsApi\Leaderboards.LeaderboardsApi.csproj" />
   </ItemGroup>
 
 </Project>

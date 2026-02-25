@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 dotnet build src/Leaderboards.slnx
 ```
 
-**Run with Aspire orchestration (recommended — starts PostgreSQL + pgAdmin + Service Bus emulator + API + Functions):**
+**Run with Aspire orchestration (recommended — starts PostgreSQL + pgAdmin + Service Bus emulator + CosmosDB emulator + all services):**
 ```bash
 dotnet run --project src/Leaderboards.AppHost
 ```
@@ -26,142 +26,85 @@ dotnet dev-certs https --trust
 
 ## Architecture
 
-.NET 10 ASP.NET Core solution using **.NET Aspire** for local orchestration. The API uses **vertical slices** architecture with **minimal APIs**.
+.NET 10 ASP.NET Core solution using **.NET Aspire** for local orchestration. APIs use **vertical slices** with **minimal APIs**.
 
 ### Projects
 
-- **`Leaderboards.MatchesApi`** — Main REST API. Uses EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development on startup via `db.Database.MigrateAsync()`. Connection strings `matches-db` (Postgres) and `service-bus` (Service Bus) are injected by Aspire at runtime.
-- **`Leaderboards.Service`** — Azure Functions isolated worker. Subscribes to the `match-created` Service Bus queue, fetches matches from `matches-api` via `MatchesApiClient`, computes a ranked leaderboard (`LeaderboardBuilder`), and persists it to CosmosDB (`LeaderboardRepository`). `MatchCreatedFunction` is the orchestrator only; computation and persistence are in separate classes.
-- **`Leaderboards.Contracts`** — Shared types referenced by both MatchesApi and Service: `MatchCreatedMessage { DateTime OccurredAtUtc, string VenueName }` and `MatchResponse { Guid Id, string WinnerId, string LoserId, string VenueName }`.
-- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up PostgreSQL + pgAdmin + Azure Service Bus emulator + CosmosDB emulator, and wires all services together. Run this project for local dev.
-- **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry (OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), `StandardResilienceHandler` on all `HttpClient` instances, and `/health` + `/alive` endpoints in development.
+- **`Leaderboards.MatchesApi`** — REST API for match creation. EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development. Publishes `MatchCreatedMessage` to the `match-created` Service Bus queue after each `POST /matches`.
+- **`Leaderboards.LeaderboardsApi`** — REST API for reading leaderboards. Single endpoint: `GET /leaderboards/{venueName}` → reads from CosmosDB via `LeaderboardRepository`.
+- **`Leaderboards.Service`** — Azure Functions isolated worker. Subscribes to `match-created`, fetches matches from `matches-api` via `MatchesApiClient`, computes rankings (`LeaderboardBuilder`), and persists to CosmosDB (`LeaderboardRepository`).
+- **`Leaderboards.Persistence`** — Shared class library. Contains `LeaderboardDocument`, `LeaderboardEntry`, `LeaderboardRepository`, and `AddLeaderboardsPersistence()` extension method. Referenced by both `LeaderboardsApi` and `Service`.
+- **`Leaderboards.Contracts`** — Shared types: `MatchCreatedMessage { DateTime OccurredAtUtc, string VenueName }` and `MatchResponse { Guid Id, string WinnerId, string LoserId, string VenueName }`.
+- **`Leaderboards.AppHost`** — Aspire orchestration host. Run this for local dev.
+- **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry, `StandardResilienceHandler` on all `HttpClient` instances, and `/health` + `/alive` endpoints in development. Uses C# 14 `extension` member syntax.
 
-### Vertical Slices in MatchesApi
+### Vertical Slices Pattern
 
-Each feature lives in its own folder under `Matches/` with a static `Map(IEndpointRouteBuilder)` method. To add a new slice:
-1. Create `Matches/<Feature>/<FeatureName>Endpoint.cs` with a `public static void Map(IEndpointRouteBuilder app)` method.
-2. Call `FeatureNameEndpoint.Map(app)` inside `MatchesEndpoints.MapMatchesEndpoints()`.
+Both `MatchesApi` and `LeaderboardsApi` use this pattern. Each feature lives in its own folder with a static `Map(IEndpointRouteBuilder)` method, registered in a central `*Endpoints.cs` file.
 
+### Current API Surface
+
+**MatchesApi** (HTTP `5374` / HTTPS `7335`):
+- `POST /matches` — `{ "winnerId": string, "loserId": string, "venueName": string }` → 201
+- `GET /matches?venueName={venueName}` — `venueName` optional → 200 array of `MatchResponse`
+
+**LeaderboardsApi** (HTTP `5375` / HTTPS `7336`):
+- `GET /leaderboards/{venueName}` → 200 with ranked leaderboard, 404 if not yet generated
+
+Test requests: `src/Leaderboards.MatchesApi/MatchesApi.http` and `src/Leaderboards.LeaderboardsApi/LeaderboardsApi.http`. OpenAPI at `/openapi/v1.json` (development only).
+
+### CosmosDB Setup — Leaderboards.Persistence
+
+**Do not use `Aspire.Microsoft.Azure.Cosmos` or `AddAzureCosmosClient`** in consuming projects. The Aspire wrapper registers a second `CosmosClient` using `DefaultAzureCredential`, which fails in local dev (IMDS unreachable). Instead, `AddLeaderboardsPersistence()` constructs `CosmosClient` directly:
+
+```csharp
+// Both consuming projects call this single method:
+builder.AddLeaderboardsPersistence();
 ```
-Leaderboards.MatchesApi/
-├── Data/
-│   ├── Match.cs                  — Entity (Guid Id, string WinnerId, string LoserId, string VenueName)
-│   ├── MatchesDbContext.cs       — EF Core DbContext
-│   └── Migrations/               — EF Core migrations (auto-applied in dev)
-├── Matches/
-│   ├── MatchesEndpoints.cs       — Registers all slices
-│   ├── Create/
-│   │   └── CreateMatchEndpoint.cs   — POST /matches; publishes MatchCreatedMessage after save
-│   └── GetAll/
-│       └── GetMatchesEndpoint.cs    — GET /matches; returns List<MatchResponse>
-└── Program.cs
-```
 
-### Data Model Notes
+`PersistenceExtensions.CreateCosmosClient` parses the connection string explicitly and uses `CosmosClient(endpoint, accountKey, options)` — this constructor has no `DefaultAzureCredential` fallback. Key options:
+- `ConnectionMode = ConnectionMode.Gateway` — required for the emulator (no Direct mode support)
+- `LimitToEndpoint = true` — required: the emulator's discovery response returns its internal Docker address (`127.0.0.1:8081`) as `writableLocations`, which the SDK would follow and fail to reach. This flag forces all requests through the provided endpoint.
 
-`WinnerId` and `LoserId` on the `Match` entity are opaque `string` fields (max 256 chars) — player identity is managed externally. All three string fields have `IsRequired()` and `HasMaxLength(256)` constraints set in `MatchesDbContext.OnModelCreating`.
+**`Newtonsoft.Json` runtime requirement:** `Microsoft.Azure.Cosmos 3.54.0` requires `Newtonsoft.Json` at runtime even when using `System.Text.Json` serialization. It must be explicitly referenced in `Leaderboards.Persistence.csproj`.
 
-### Service Bus
+**Connection string injection:** Aspire injects with `AccountEndpoint=tcp://localhost:PORT`. The vnext-preview emulator serves plain HTTP, so `PersistenceExtensions` rewrites `tcp://` → `http://` before constructing the client. Aspire uses different config paths per project type:
+- Functions: `Aspire:Microsoft:Azure:Cosmos:cosmos:ConnectionString`
+- Standard ASP.NET Core: `ConnectionStrings:cosmos`
 
-`POST /matches` publishes a `MatchCreatedMessage` (JSON) to the `match-created` queue after persisting to the database. `MatchCreatedMessage` intentionally omits winner/loser IDs — it only carries `OccurredAtUtc` and `VenueName`. The `ServiceBusSender` for this queue is registered as a singleton in `Program.cs` and injected into the endpoint handler.
+Both paths are checked with `??` fallback.
 
-AppHost wires the emulator via `builder.AddAzureServiceBus("service-bus").RunAsEmulator().AddServiceBusQueue("match-created")`. The API publishes with `builder.AddAzureServiceBusClient("service-bus")`.
+**CosmosDB schema:** One document per venue in the `leaderboards` container of `leaderboards-db`. Partition key `/VenueName`; document `id` equals `VenueName`. `Entries` ordered by `Rank` ascending (Rank 1 = best).
+
+**`EnsureInitializedAsync`** uses `CreateDatabaseIfNotExistsAsync` + `CreateContainerIfNotExistsAsync` and is called on every repository operation.
+
+### CosmosDB Emulator Quirks (AppHost)
+
+- ARM64 image: `mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview` — the default `latest` tag has no ARM64 manifest.
+- Do **not** call `cosmos.AddCosmosDatabase(...)` or `.WaitFor(cosmos)` — both trigger Aspire's SDK health check using the `tcp://` scheme, leaving the resource permanently Unhealthy.
+- `cosmos_check` in the Aspire dashboard always shows **Unhealthy** — known limitation. Operations work correctly.
 
 ### Azure Functions + Aspire Integration
 
-`Leaderboards.Service` is registered in AppHost with `AddAzureFunctionsProject` (not `AddProject`). Key behaviors:
+`Leaderboards.Service` is registered with `AddAzureFunctionsProject` (not `AddProject`). Key behaviors:
 
-- `WithReference(serviceBus)` uses a Functions-specific overload that sets `service-bus` as a full connection string env var.
-- `WithReference(matchesApi)` injects the `matches-api` HTTPS endpoint for service discovery.
 - `WithHostStorage(storage)` is required — the Functions host needs Azure Storage for internal coordination.
-- Aspire auto-sets `FUNCTIONS_WORKER_RUNTIME=dotnet-isolated`.
-- **Do not call `builder.AddServiceDefaults()` in the Functions `Program.cs`** — the worker inherits `OTEL_EXPORTER_OTLP_ENDPOINT` from the `func` host process, so calling `AddServiceDefaults()` creates a second OTEL pipeline and every log appears twice in the Aspire dashboard.
-- The connection string remapping in `Program.cs` is required: Aspire injects `ConnectionStrings:service-bus`, but the Functions trigger binding expects `service-bus__connectionString`.
-- **`AppContext.SetSwitch("Azure.Experimental.EnableActivitySource", true)` must be called before `FunctionsApplication.CreateBuilder`** — this enables the Azure SDK activity source for proper distributed trace propagation through Service Bus messages. Both MatchesApi and Leaderboards.Service set this switch.
-
-### OpenTelemetry in Leaderboards.Service
-
-`Leaderboards.Service` configures **tracing only** (not logging) via `AddOpenTelemetry().WithTracing(...)`. Logging is intentionally excluded because it flows through the `func` host process to avoid duplicates. The tracing setup includes:
-- `AddSource("Leaderboards.Service")` — custom activity source
-- `AddHttpClientInstrumentation()` — auto-traces outbound HTTP calls
-- `AddOtlpExporter()` — exports to the Aspire dashboard via the inherited `OTEL_EXPORTER_OTLP_ENDPOINT`
+- **Do not call `builder.AddServiceDefaults()` in the Functions `Program.cs`** — creates a second OTEL pipeline; every log appears twice in the Aspire dashboard.
+- Connection string remapping is required: Aspire injects `ConnectionStrings:service-bus`, but the trigger binding expects `service-bus__connectionString`.
+- **`AppContext.SetSwitch("Azure.Experimental.EnableActivitySource", true)` must be called before `FunctionsApplication.CreateBuilder`** — enables the Azure SDK activity source for distributed trace propagation through Service Bus messages.
+- `Leaderboards.Service` configures **tracing only** (not logging) — logs flow through the `func` host process.
 
 ### Distributed Trace Propagation
 
-When `POST /matches` publishes to Service Bus, the Azure SDK embeds the W3C trace context as a `Diagnostic-Id` property on the message. `MatchCreatedFunction` restores this context manually:
-
-```csharp
-// Bind trigger directly to ServiceBusReceivedMessage — NOT to the deserialized type.
-// The isolated worker runtime does NOT support binding both simultaneously.
-public async Task Run(
-    [ServiceBusTrigger("match-created", Connection = "service-bus")] ServiceBusReceivedMessage message)
-{
-    var matchCreated = message.Body.ToObjectFromJson<MatchCreatedMessage>()!;
-    var diagnosticId = message.ApplicationProperties.GetValueOrDefault("Diagnostic-Id")?.ToString();
-    ActivityContext parentContext = default;
-    if (diagnosticId is not null)
-        ActivityContext.TryParse(diagnosticId, traceState: null, isRemote: true, out parentContext);
-    using var activity = ActivitySource.StartActivity("match-created process", ActivityKind.Consumer, parentContext);
-    // ...
-}
-```
-
-The `HttpClient` call to `matches-api` and all logging within the `using var activity` scope appear as children of the original `POST /matches` trace in the Aspire dashboard.
+`POST /matches` embeds the W3C trace context as `Diagnostic-Id` on the Service Bus message. `MatchCreatedFunction` restores it manually using `ActivityContext.TryParse` and `ActivitySource.StartActivity(..., parentContext)`. Bind the trigger to `ServiceBusReceivedMessage` directly (not the deserialized type) — the isolated worker runtime does not support binding both simultaneously.
 
 ### Service Defaults Pattern
 
-`MatchesApi` calls `builder.AddServiceDefaults()` and `app.MapDefaultEndpoints()`. This adds OpenTelemetry, HTTP resilience, and `/health` + `/alive` endpoints in development. `Leaderboards.Service` does **not** call `AddServiceDefaults()` (see above).
-
-`ServiceDefaults/Extensions.cs` uses the **C# 14 `extension` member syntax** (`extension<TBuilder>(TBuilder builder) { ... }`) — this is different from classic `static` extension methods.
-
-### Leaderboards.Service Structure
-
-```
-Leaderboards.Service/
-├── Leaderboards/
-│   ├── LeaderboardBuilder.cs    — pure computation: matches → ranked entry list
-│   ├── LeaderboardDocument.cs   — CosmosDB document + entry records
-│   └── LeaderboardRepository.cs — CosmosDB upsert + lazy DB/container init
-├── MatchCreatedFunction.cs      — Function trigger; orchestrates the above
-├── MatchesApiClient.cs          — HTTP client for matches-api
-└── Program.cs
-```
-
-All files share the `Leaderboards.Service` namespace regardless of subfolder.
-
-### CosmosDB in Leaderboards.Service
-
-CosmosDB stores one document per venue in the `leaderboards` container of the `leaderboards-db` database. Partition key is `/VenueName`; document `id` equals `VenueName`. Each document has `Entries` ordered by `Rank` ascending (Rank 1 = best), with each entry carrying `Rank`, `PlayerId`, and `Skill`.
-
-`LeaderboardRepository` is a singleton. `EnsureInitializedAsync` runs on the first `UpsertAsync` call: it creates the database and container using `CreateDatabaseAsync`/`CreateContainerAsync` + catch 409, avoiding the internal GET→404 that `CreateIfNotExists` variants would generate as error spans. A `volatile bool _initialized` skips this on subsequent calls.
-
-**CosmosDB emulator quirks (AppHost):**
-- ARM64 image: `mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview` — the default `latest` tag has no ARM64 manifest.
-- Do **not** call `cosmos.AddCosmosDatabase(...)` or `.WaitFor(cosmos)` in AppHost — both trigger Aspire's SDK health check, which uses the `tcp://` scheme that the CosmosDB SDK doesn't support, leaving the resource permanently Unhealthy.
-- `cosmos_check` in the Aspire dashboard will always show **Unhealthy** — this is a known limitation. Aspire's AppHost-level health check for the CosmosDB resource uses the `tcp://` emulator connection string, which the SDK rejects. The actual operations work correctly.
-
-**CosmosDB connection string rewrite (Program.cs):**
-Aspire injects the connection string with `AccountEndpoint=tcp://...`. The vnext-preview emulator serves plain HTTP. `Program.cs` rewrites the `Aspire:Microsoft:Azure:Cosmos:cosmos:ConnectionString` config key from `tcp://` to `http://` before `AddAzureCosmosClient` is called. `ConnectionMode.Gateway` is also required for the emulator.
+`MatchesApi` and `LeaderboardsApi` call `builder.AddServiceDefaults()` and `app.MapDefaultEndpoints()`. `Leaderboards.Service` does **not**.
 
 ### Tests
 
-There are no test projects. Build success and EF migration application (auto-run in dev) are the main verification steps.
-
-### Current API
-
-- `POST /matches` — Body: `{ "winnerId": string, "loserId": string, "venueName": string }` → 201 with created match
-- `GET /matches?venueName={venueName}` — `venueName` is optional; omit to return all matches → 200 array of `MatchResponse`
-
-OpenAPI docs available in development at `/openapi/v1.json`. Test requests are in `src/Leaderboards.MatchesApi/MatchesApi.http`.
-
-### HTTP Ports (development)
-
-- HTTP: `5374`
-- HTTPS: `7335`
-
-### Planned API Surface
-
-- `GET /leaderboards/{venueId}` — Read ranked leaderboard for a venue from CosmosDB
+No test projects. Build success and EF migration application (auto-run in dev) are the main verification steps.
 
 ### Scaling Architecture
 

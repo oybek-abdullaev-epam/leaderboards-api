@@ -1,4 +1,5 @@
 using Leaderboards.Contracts;
+using Leaderboards.Persistence;
 
 namespace Leaderboards.Service;
 

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Azure.Messaging.ServiceBus;
 using Leaderboards.Contracts;
+using Leaderboards.Persistence;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 

@@ -25,6 +25,10 @@ var matchesApi = builder.AddProject<Projects.Leaderboards_MatchesApi>("matches-a
     .WaitFor(serviceBus)
     .WithHttpHealthCheck("/health");
 
+builder.AddProject<Projects.Leaderboards_LeaderboardsApi>("leaderboards-api")
+    .WithReference(cosmos)
+    .WithHttpHealthCheck("/health");
+
 builder.AddAzureFunctionsProject<Projects.Leaderboards_Service>("leaderboards-service")
     .WithReference(serviceBus)
     .WithReference(matchesApi)

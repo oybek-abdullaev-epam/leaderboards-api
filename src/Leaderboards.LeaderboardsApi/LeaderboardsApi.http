@@ -1,0 +1,10 @@
+@HostAddress = https://localhost:7336
+
+GET {{HostAddress}}/
+
+###
+
+GET {{HostAddress}}/leaderboards/arena-1
+Accept: application/json
+
+###

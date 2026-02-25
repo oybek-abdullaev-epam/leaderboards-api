@@ -1,6 +1,4 @@
-namespace Leaderboards.Service;
-
-public record LeaderboardEntry(int Rank, string PlayerId, int Skill);
+namespace Leaderboards.Persistence;
 
 public record LeaderboardDocument(
     string id,           // Cosmos DB id — equals VenueName
