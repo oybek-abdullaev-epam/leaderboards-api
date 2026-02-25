@@ -31,9 +31,9 @@ dotnet dev-certs https --trust
 ### Projects
 
 - **`Leaderboards.MatchesApi`** — Main REST API. Uses EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development on startup via `db.Database.MigrateAsync()`. Connection strings `matches-db` (Postgres) and `service-bus` (Service Bus) are injected by Aspire at runtime.
-- **`Leaderboards.Service`** — Azure Functions isolated worker. Subscribes to the `match-created` Service Bus queue, fetches matches from `matches-api` via `MatchesApiClient`, and produces a leaderboard.
+- **`Leaderboards.Service`** — Azure Functions isolated worker. Subscribes to the `match-created` Service Bus queue, fetches matches from `matches-api` via `MatchesApiClient`, computes a ranked leaderboard (`LeaderboardBuilder`), and persists it to CosmosDB (`LeaderboardRepository`). `MatchCreatedFunction` is the orchestrator only; computation and persistence are in separate classes.
 - **`Leaderboards.Contracts`** — Shared types referenced by both MatchesApi and Service: `MatchCreatedMessage { DateTime OccurredAtUtc, string VenueName }` and `MatchResponse { Guid Id, string WinnerId, string LoserId, string VenueName }`.
-- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up PostgreSQL + pgAdmin + Azure Service Bus emulator, and wires all services together. Run this project for local dev.
+- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up PostgreSQL + pgAdmin + Azure Service Bus emulator + CosmosDB emulator, and wires all services together. Run this project for local dev.
 - **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry (OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), `StandardResilienceHandler` on all `HttpClient` instances, and `/health` + `/alive` endpoints in development.
 
 ### Vertical Slices in MatchesApi
@@ -114,6 +114,35 @@ The `HttpClient` call to `matches-api` and all logging within the `using var act
 
 `ServiceDefaults/Extensions.cs` uses the **C# 14 `extension` member syntax** (`extension<TBuilder>(TBuilder builder) { ... }`) — this is different from classic `static` extension methods.
 
+### Leaderboards.Service Structure
+
+```
+Leaderboards.Service/
+├── Leaderboards/
+│   ├── LeaderboardBuilder.cs    — pure computation: matches → ranked entry list
+│   ├── LeaderboardDocument.cs   — CosmosDB document + entry records
+│   └── LeaderboardRepository.cs — CosmosDB upsert + lazy DB/container init
+├── MatchCreatedFunction.cs      — Function trigger; orchestrates the above
+├── MatchesApiClient.cs          — HTTP client for matches-api
+└── Program.cs
+```
+
+All files share the `Leaderboards.Service` namespace regardless of subfolder.
+
+### CosmosDB in Leaderboards.Service
+
+CosmosDB stores one document per venue in the `leaderboards` container of the `leaderboards-db` database. Partition key is `/VenueName`; document `id` equals `VenueName`. Each document has `Entries` ordered by `Rank` ascending (Rank 1 = best), with each entry carrying `Rank`, `PlayerId`, and `Skill`.
+
+`LeaderboardRepository` is a singleton. `EnsureInitializedAsync` runs on the first `UpsertAsync` call: it creates the database and container using `CreateDatabaseAsync`/`CreateContainerAsync` + catch 409, avoiding the internal GET→404 that `CreateIfNotExists` variants would generate as error spans. A `volatile bool _initialized` skips this on subsequent calls.
+
+**CosmosDB emulator quirks (AppHost):**
+- ARM64 image: `mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview` — the default `latest` tag has no ARM64 manifest.
+- Do **not** call `cosmos.AddCosmosDatabase(...)` or `.WaitFor(cosmos)` in AppHost — both trigger Aspire's SDK health check, which uses the `tcp://` scheme that the CosmosDB SDK doesn't support, leaving the resource permanently Unhealthy.
+- `cosmos_check` in the Aspire dashboard will always show **Unhealthy** — this is a known limitation. Aspire's AppHost-level health check for the CosmosDB resource uses the `tcp://` emulator connection string, which the SDK rejects. The actual operations work correctly.
+
+**CosmosDB connection string rewrite (Program.cs):**
+Aspire injects the connection string with `AccountEndpoint=tcp://...`. The vnext-preview emulator serves plain HTTP. `Program.cs` rewrites the `Aspire:Microsoft:Azure:Cosmos:cosmos:ConnectionString` config key from `tcp://` to `http://` before `AddAzureCosmosClient` is called. `ConnectionMode.Gateway` is also required for the emulator.
+
 ### Tests
 
 There are no test projects. Build success and EF migration application (auto-run in dev) are the main verification steps.
@@ -132,7 +161,7 @@ OpenAPI docs available in development at `/openapi/v1.json`. Test requests are i
 
 ### Planned API Surface
 
-- `GET /leaderboards/{venueId}` — Read ranked leaderboard for a venue
+- `GET /leaderboards/{venueId}` — Read ranked leaderboard for a venue from CosmosDB
 
 ### Scaling Architecture
 

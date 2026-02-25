@@ -6,7 +6,11 @@ using Microsoft.Extensions.Logging;
 
 namespace Leaderboards.Service;
 
-public class MatchCreatedFunction(ILogger<MatchCreatedFunction> logger, MatchesApiClient matchesApi)
+public class MatchCreatedFunction(
+    ILogger<MatchCreatedFunction> logger,
+    MatchesApiClient matchesApi,
+    LeaderboardBuilder leaderboardBuilder,
+    LeaderboardRepository leaderboardRepository)
 {
     private static readonly ActivitySource ActivitySource = new("Leaderboards.Service");
 
@@ -29,19 +33,18 @@ public class MatchCreatedFunction(ILogger<MatchCreatedFunction> logger, MatchesA
             matchCreated.VenueName, matchCreated.OccurredAtUtc);
 
         var matches = await matchesApi.GetMatchesForVenueAsync(matchCreated.VenueName);
+        var entries = leaderboardBuilder.Build(matches);
 
-        var leaderboard = matches
-            .SelectMany(m => new[] { m.WinnerId, m.LoserId })
-            .Distinct()
-            .Select(playerId => new { PlayerId = playerId, Skill = Random.Shared.Next(1, 101) })
-            .OrderByDescending(e => e.Skill)
-            .ToList();
+        var doc = new LeaderboardDocument(
+            id: matchCreated.VenueName,
+            VenueName: matchCreated.VenueName,
+            Entries: entries,
+            UpdatedAtUtc: DateTime.UtcNow);
+
+        await leaderboardRepository.UpsertAsync(doc);
 
         logger.LogInformation(
-            "Leaderboard for {VenueName} ({Count} players):",
-            matchCreated.VenueName, leaderboard.Count);
-
-        foreach (var (entry, rank) in leaderboard.Select((e, i) => (e, i + 1)))
-            logger.LogInformation("  #{Rank} {PlayerId} — Skill: {Skill}", rank, entry.PlayerId, entry.Skill);
+            "Leaderboard for {VenueName} written to CosmosDB ({Count} players)",
+            matchCreated.VenueName, entries.Count);
     }
 }
