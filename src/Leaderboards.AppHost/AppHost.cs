@@ -5,6 +5,8 @@ var postgres = builder.AddPostgres("postgres")
 
 var matchesDb = postgres.AddDatabase("matches-db");
 
+var storage = builder.AddAzureStorage("storage").RunAsEmulator();
+
 var serviceBus = builder.AddAzureServiceBus("service-bus")
     .RunAsEmulator();
 
@@ -16,5 +18,10 @@ builder.AddProject<Projects.Leaderboards_MatchesApi>("matches-api")
     .WaitFor(matchesDb)
     .WaitFor(serviceBus)
     .WithHttpHealthCheck("/health");
+
+builder.AddAzureFunctionsProject<Projects.Leaderboards_Service>("leaderboards-service")
+    .WithReference(serviceBus)
+    .WithHostStorage(storage)
+    .WaitFor(serviceBus);
 
 builder.Build().Run();

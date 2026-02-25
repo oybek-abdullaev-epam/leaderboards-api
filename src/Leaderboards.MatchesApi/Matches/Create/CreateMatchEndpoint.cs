@@ -1,4 +1,5 @@
 using Azure.Messaging.ServiceBus;
+using Leaderboards.Contracts;
 using Leaderboards.MatchesApi.Data;
 
 namespace Leaderboards.MatchesApi.Matches.Create;

@@ -1,5 +1,7 @@
 <Solution>
   <Project Path="Leaderboards.AppHost/Leaderboards.AppHost.csproj" />
+  <Project Path="Leaderboards.Contracts/Leaderboards.Contracts.csproj" />
+  <Project Path="Leaderboards.Service/Leaderboards.Service.csproj" />
   <Project Path="Leaderboards.MatchesApi\Leaderboards.MatchesApi.csproj" />
   <Project Path="Leaderboards.ServiceDefaults/Leaderboards.ServiceDefaults.csproj" />
 </Solution>

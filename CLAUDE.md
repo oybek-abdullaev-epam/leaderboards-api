@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 dotnet build src/Leaderboards.slnx
 ```
 
-**Run with Aspire orchestration (recommended — starts PostgreSQL container + pgAdmin + API):**
+**Run with Aspire orchestration (recommended — starts PostgreSQL + pgAdmin + Service Bus emulator + API + Functions):**
 ```bash
 dotnet run --project src/Leaderboards.AppHost
 ```
@@ -31,8 +31,10 @@ dotnet dev-certs https --trust
 ### Projects
 
 - **`Leaderboards.MatchesApi`** — Main REST API. Uses EF Core + Npgsql (PostgreSQL). Migrations are auto-applied in Development on startup via `db.Database.MigrateAsync()`. Connection strings `matches-db` (Postgres) and `service-bus` (Service Bus) are injected by Aspire at runtime.
-- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up PostgreSQL + pgAdmin + Azure Service Bus emulator, and wires both into `matches-api`. Run this project for local dev.
-- **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry (tracing, metrics, logging), HTTP resilience, service discovery, and `/health` + `/alive` endpoints (development only).
+- **`Leaderboards.Service`** — Azure Functions isolated worker. Subscribes to the `match-created` Service Bus queue via `[ServiceBusTrigger]`. Wired into Aspire via `AddAzureFunctionsProject`.
+- **`Leaderboards.Contracts`** — Shared message contracts. Currently holds `MatchCreatedMessage { DateTime OccurredAtUtc, string VenueName }`. Referenced by both MatchesApi (publisher) and Service (consumer).
+- **`Leaderboards.AppHost`** — Aspire orchestration host (`AppHost.cs`). Spins up PostgreSQL + pgAdmin + Azure Service Bus emulator, and wires all services together. Run this project for local dev.
+- **`Leaderboards.ServiceDefaults`** — Shared library. Configures OpenTelemetry (OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), `StandardResilienceHandler` on all `HttpClient` instances, and `/health` + `/alive` endpoints in development.
 
 ### Vertical Slices in MatchesApi
 
@@ -49,8 +51,7 @@ Leaderboards.MatchesApi/
 ├── Matches/
 │   ├── MatchesEndpoints.cs       — Registers all slices
 │   ├── Create/
-│   │   ├── CreateMatchEndpoint.cs   — POST /matches; publishes MatchCreatedMessage after save
-│   │   └── MatchCreatedMessage.cs   — { DateTime OccurredAtUtc, string VenueName }
+│   │   └── CreateMatchEndpoint.cs   — POST /matches; publishes MatchCreatedMessage after save
 │   └── GetAll/
 │       └── GetMatchesEndpoint.cs    — GET /matches
 └── Program.cs
@@ -62,15 +63,24 @@ Leaderboards.MatchesApi/
 
 ### Service Bus
 
-`POST /matches` publishes a `MatchCreatedMessage` (JSON) to the `match-created` queue after persisting to the database. `MatchCreatedMessage` intentionally omits winner/loser IDs — it only carries `OccurredAtUtc` and `VenueName` (sufficient for leaderboard ranking updates). The `ServiceBusSender` for this queue is registered as a singleton in `Program.cs` and injected into the endpoint handler.
+`POST /matches` publishes a `MatchCreatedMessage` (JSON) to the `match-created` queue after persisting to the database. `MatchCreatedMessage` intentionally omits winner/loser IDs — it only carries `OccurredAtUtc` and `VenueName`. The `ServiceBusSender` for this queue is registered as a singleton in `Program.cs` and injected into the endpoint handler.
 
-AppHost wires the emulator via `builder.AddAzureServiceBus("service-bus").RunAsEmulator().AddServiceBusQueue("match-created")`. The API consumes it with `builder.AddAzureServiceBusClient("service-bus")`.
+AppHost wires the emulator via `builder.AddAzureServiceBus("service-bus").RunAsEmulator().AddServiceBusQueue("match-created")`. The API publishes with `builder.AddAzureServiceBusClient("service-bus")`.
+
+### Azure Functions + Aspire Integration
+
+`Leaderboards.Service` is registered in AppHost with `AddAzureFunctionsProject` (not `AddProject`). Key behaviors:
+- `WithReference(serviceBus)` uses a Functions-specific overload that sets `service-bus` as a full connection string env var.
+- `WithHostStorage(storage)` is required — the Functions host needs Azure Storage for internal coordination.
+- Aspire auto-sets `FUNCTIONS_WORKER_RUNTIME=dotnet-isolated`.
+- **Do not call `builder.AddServiceDefaults()` in the Functions `Program.cs`** — the worker inherits `OTEL_EXPORTER_OTLP_ENDPOINT` from the `func` host process, so calling `AddServiceDefaults()` creates a second OTEL pipeline and every log appears twice in the Aspire dashboard.
+- The connection string remapping in `Program.cs` is required: Aspire injects `ConnectionStrings:service-bus`, but the Functions trigger binding expects `service-bus__connectionString`.
 
 ### Service Defaults Pattern
 
-Every service calls `builder.AddServiceDefaults()` and `app.MapDefaultEndpoints()`. This adds OpenTelemetry (OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), `StandardResilienceHandler` on all `HttpClient` instances, and `/health` (readiness) + `/alive` (liveness) endpoints in development.
+`MatchesApi` calls `builder.AddServiceDefaults()` and `app.MapDefaultEndpoints()`. This adds OpenTelemetry, HTTP resilience, and `/health` + `/alive` endpoints in development. `Leaderboards.Service` does **not** call `AddServiceDefaults()` (see above).
 
-`ServiceDefaults/Extensions.cs` uses the **C# 14 `extension` member syntax** (`extension<TBuilder>(TBuilder builder) { ... }`) — this is different from classic `static` extension methods and may look unfamiliar.
+`ServiceDefaults/Extensions.cs` uses the **C# 14 `extension` member syntax** (`extension<TBuilder>(TBuilder builder) { ... }`) — this is different from classic `static` extension methods.
 
 ### Tests
 
@@ -81,7 +91,12 @@ There are no test projects. Build success and EF migration application (auto-run
 - `POST /matches` — Body: `{ "winnerId": string, "loserId": string, "venueName": string }` → 201 with created match
 - `GET /matches?venueName={venueName}` — `venueName` is optional; omit to return all matches → 200 array
 
-OpenAPI docs available in development at `/openapi/v1.json`.
+OpenAPI docs available in development at `/openapi/v1.json`. Test requests are in `src/Leaderboards.MatchesApi/MatchesApi.http`.
+
+### HTTP Ports (development)
+
+- HTTP: `5374`
+- HTTPS: `7335`
 
 ### Planned API Surface
 
@@ -94,10 +109,3 @@ OpenAPI docs available in development at `/openapi/v1.json`.
 2. **Async** — In-memory channels or fire-and-forget
 3. **Distributed** — Outbox pattern + Azure Service Bus with sessions
 4. **High scale** — Partitioning by `VenueId`, eventual CosmosDB
-
-### HTTP Ports (development)
-
-- HTTP: `5374`
-- HTTPS: `7335`
-
-Test requests are in `src/Leaderboards.MatchesApi/MatchesApi.http`.
