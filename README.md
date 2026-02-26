@@ -6,8 +6,8 @@ A distributed leaderboard system built with .NET 10, ASP.NET Core, and Azure ser
 
 ```
 POST /matches  →  MatchesApi  →  Service Bus  →  Leaderboards.Service  →  CosmosDB
-                                                                               ↓
-GET /leaderboards/{venue}  ←  LeaderboardsApi  ←─────────────────────────────┘
+                                                                               ↑
+GET /leaderboards/{venue}  →  LeaderboardsApi  →──────────────────────────────┘
 ```
 
 The system is orchestrated locally via [.NET Aspire](https://learn.microsoft.com/en-us/dotnet/aspire/), which provisions all infrastructure (PostgreSQL, Azure Service Bus emulator, CosmosDB emulator) and wires up service discovery automatically.
